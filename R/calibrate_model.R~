@@ -1,0 +1,102 @@
+# main file for MCMC calibration for GEV models
+
+library(parallel)
+library(adaptMCMC)
+
+source('~/work/ScienceUncertainty/R/gev_posterior.R')
+
+# set paths for data and storage
+data.path <- '~/work/ScienceUncertainty/data'
+output.path <- '~/work/ScienceUncertainty/output'
+
+for (path in c(data.path, output.path)) {
+  if (!dir.exists(path)) {
+    dir.create(path)
+  }
+}
+
+# set parameters for this run
+# method can be "MLE," "prelim," or "production"
+method <- 'MLE'
+# model can be 'stationary' or 'nonstationary' (location parameter is a linear function of temp)
+model <- 'stationary'
+
+# these are required for either MCMC method
+if (method != 'MLE') {
+  # number of MCMC iterations per chain
+  n.iter <- 100000
+  # number of MCMC chains
+  n.chain <- 10
+  # number of cpus
+  n.cpu <- parallel::detectCores()
+} else {
+# these are required for MLE
+  library(DEoptim)
+  # DEOptim control parameters
+  # number of DEOptim population members
+  NP.deoptim <- 100
+  # number of DEoptim iterations
+  niter.deoptim <- 200
+  # differential weighting factor
+  F.deoptim <- 0.8
+  # crossover probability
+  CR.deoptim <- 0.9
+  # lower and upper bounds for each variable
+  if (model == 'stationary') {
+    bounds.lower <- c(0, 0, -2)
+    bounds.upper <- c(2000, 800, 2)
+  } else if (model == 'nonstationary') {
+    bounds.lower <- c(0, 0, 0, -2)
+    bounds.upper <- c(2000, 500, 800, 2)
+  }
+}
+
+# process data
+filename.data <- 'processed_norfolk.rds'
+# don't need to re-process if this has already been done
+if (!file.exists(file.path(output.path, filename.data))) {
+  source('~/work/ScienceUncertainty/R/process_norfolk_data.R')
+  dat_list <- data_process_norfolk(sl.data.path=paste(data.path, 'tide_gauge_SewellsPoint', sep=.Platform$file.sep),
+                                   temp.data.path=paste(data.path, 'temperature', sep=.Platform$file.sep))
+  saveRDS(dat_list, file.path(output.path, filename.data))
+} else {
+  dat_list <- readRDS(file.path(output.path, filename.data))
+}
+
+# prune temperature data to match tide gauge data
+dat_calib <- merge(dat_list$gev, dat_list$temps$forcing)
+
+# set up parameter name list
+if (model == 'stationary') {
+  parnames <- c('lambda', 'sigma', 'xi')
+} else if (model == 'nonstationary') {
+  parnames <- c('lambda0', 'lambda1', 'sigma', 'xi')
+}
+
+# if method is MLE, compute maximum likelihood estimates and save. This must be done
+# before MCMC.
+if (method == 'MLE') {
+  filename.mle <- paste('norfolk_mle-',model,'.rds', sep='')
+  
+  if (file.exists(file.path(output.path, filename.mle))) {
+    print('MLE Parameters already found!')
+  } else {
+    print('starting DE optimization for MLE parameters for Norfolk...')
+  
+    if (model == 'stationary') {
+      aux_data <- NULL
+    } else if (model == 'nonstationary') {
+      aux_data <- data_calib$temp
+    }
+    deoptim_out <- DEoptim(fn=neg_log_likelihood, 
+                           lower=bounds.lower,
+                           upper=bounds.upper,
+                           DEoptim.control(NP=NP.deoptim, itermax=niter.deoptim, F=F.deoptim, CR=CR.deoptim, trace=FALSE),
+                           parnames=parnames, model=model, dat=dat_calib$gev, aux_data=aux_data)
+  
+    est.ml <- deoptim_out$optim$bestmem
+    names(est.ml) <- parnames
+    
+    saveRDS(est.ml, file.path(output.path, filename.mle))
+  }
+}
